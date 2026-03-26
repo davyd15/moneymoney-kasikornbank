@@ -1,11 +1,13 @@
 -- ============================================================
 -- MoneyMoney Web Banking Extension
 -- Kasikorn Bank (KBank) Thailand – K BIZ Online Banking
--- Version: 3.20
+-- Version: 3.59
+-- 3.59: POST-Endpoint /authen/login.do → /authen/loginAuthen.do (Bank-Update),
+--       captcha-Feld durch maxTouchPoint ersetzt
 --
 -- Login-Flow:
 --   1. GET  /authen/login.jsp?lang=en          → tokenId aus Hidden-Field
---   2. POST /authen/login.do                   → userName, password, tokenId, ...
+--   2. POST /authen/loginAuthen.do             → userName, password, tokenId, ...
 --   3. Response-JS: window.location = '/authen/ib/redirectToIB.jsp'
 --   4. GET  /authen/ib/redirectToIB.jsp        → dataRsso-Token
 --   5. GET  /login?dataRsso=...                → Angular-App Session
@@ -17,7 +19,7 @@
 -- ============================================================
 
 WebBanking {
-  version     = 3.58,
+  version     = 3.59,
   url         = "https://kbiz.kasikornbank.com",
   services    = {"Kasikorn Bank (KBiz)"},
   description = "Kasikorn Bank (KBank) Thailand – K BIZ Online Banking"
@@ -112,12 +114,12 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
                    "&cmd=authenticate" ..
                    "&locale=en"  ..
                    "&custType="  ..
-                   "&captcha="   ..
+                   "&maxTouchPoint=" ..
                    "&app=0"
 
   local loginContent, loginCharset = session.connection:request(
     "POST",
-    BASE_URL .. "/authen/login.do",
+    BASE_URL .. "/authen/loginAuthen.do",
     postBody,
     "application/x-www-form-urlencoded; charset=UTF-8",
     {
