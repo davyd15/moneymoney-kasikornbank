@@ -1,7 +1,10 @@
 -- ============================================================
 -- MoneyMoney Web Banking Extension
 -- Kasikorn Bank (KBank) Thailand – K BIZ Online Banking
--- Version: 3.61
+-- Version: 3.62
+-- 3.62: Referer-Header im redirectToIB-Request korrigiert (loginAuthen.do);
+--       MM.sleep(0.3) zwischen Detail-Calls; origRqUid als Cache-Key;
+--       valueDate aus effectiveDate; MM.urlencode UTF-8; Cleanup
 -- 3.61: Detail-Call für alle FTOB-Transaktionen (nicht nur PromptPay), um
 --       Empfängernamen bei Payment/Transfer-Umsätzen zu laden
 -- 3.60: os.execute("sleep") entfernt (nicht in MoneyMoney-Sandbox verfügbar)
@@ -22,7 +25,7 @@
 -- ============================================================
 
 WebBanking {
-  version     = 3.61,
+  version     = 3.62,
   url         = "https://kbiz.kasikornbank.com",
   services    = {"Kasikorn Bank (KBiz)"},
   description = "Kasikorn Bank (KBank) Thailand – K BIZ Online Banking"
@@ -64,7 +67,6 @@ local session = {
   ownerType   = nil,
   authToken   = nil,    -- x-session-token = Authorization Header
   ibId        = nil,    -- x-ib-id / x-session-ibid
-  dataRssoURL = nil,    -- für Referer-Header in API-Calls
 }
 
 -- ============================================================
@@ -111,8 +113,8 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
   -- Schritt 2: Login-POST
   -- --------------------------------------------------------
   MM.printStatus("Anmelden ...")
-  local postBody = "userName="  .. MM.urlencode(username) ..
-                   "&password=" .. MM.urlencode(password) ..
+  local postBody = "userName="  .. MM.urlencode(username, "UTF-8") ..
+                   "&password=" .. MM.urlencode(password, "UTF-8") ..
                    "&tokenId="  .. MM.urlencode(tokenId)  ..
                    "&cmd=authenticate" ..
                    "&locale=en"  ..
@@ -161,7 +163,7 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
   local redirectContent = session.connection:request(
     "GET", redirectURL, nil, nil,
     {
-      ["Referer"] = BASE_URL .. "/authen/login.do",
+      ["Referer"] = BASE_URL .. "/authen/loginAuthen.do",
       ["Accept"]  = "text/html,application/xhtml+xml,*/*",
     }
   )
@@ -191,8 +193,6 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
     return "Fehler: dataRsso Token nicht extrahierbar."
   end
   print("dataRsso Token extrahiert, Laenge: " .. #dataRsso)
-
-  session.dataRssoURL = dataRssoURL
 
   print("Lade Angular-App ...")
   session.connection:request("GET", dataRssoURL, nil, nil,
@@ -451,7 +451,8 @@ function RefreshAccount(account, since)
   end
 
   -- --------------------------------------------------------
-  -- Detail-Calls für PromptPay-Transaktionen ohne Empfängernamen
+  -- Detail-Calls für FTPP/FTOB-Transaktionen ohne Empfängernamen
+  -- Cache-Key: origRqUid (eindeutig pro Transaktion, TTL 90 Tage)
   -- --------------------------------------------------------
   local detailCutoff      = now - DETAIL_CALL_DAYS * SECONDS_PER_DAY
   local cacheTtl          = PROXY_CACHE_TTL_DAYS * SECONDS_PER_DAY
@@ -461,28 +462,26 @@ function RefreshAccount(account, since)
 
   for _, t in ipairs(transactions) do
     if t._detail and t.bookingDate >= detailCutoff then
-      local proxyKey   = t._detail.citizenId
+      local cacheKey   = "pc_" .. t._detail.origRqUid
       local cachedName = nil
 
-      -- Cache prüfen
-      if proxyKey and #proxyKey > 0 then
-        local cacheEntry = LocalStorage["pc_" .. proxyKey]
-        if cacheEntry then
-          local ts, name = cacheEntry:match("^(%d+)|(.*)$")
-          if ts and (now - tonumber(ts)) < cacheTtl then
-            cachedName = name
-            cacheHits  = cacheHits + 1
-          else
-            LocalStorage["pc_" .. proxyKey] = nil
-          end
+      -- Cache prüfen (origRqUid als Schlüssel)
+      local cacheEntry = LocalStorage[cacheKey]
+      if cacheEntry then
+        local ts, name = cacheEntry:match("^(%d+)|(.*)$")
+        if ts and (now - tonumber(ts)) < cacheTtl then
+          cachedName = name
+          cacheHits  = cacheHits + 1
+        else
+          LocalStorage[cacheKey] = nil
         end
       end
 
       if cachedName and #cachedName > 0 then
-        -- Cache-Treffer: Name direkt setzen
         t.name    = cachedName
         t.purpose = t.purpose:gsub(" %(PromptPay[^)]*%)", "")
       elseif not detailRateLimited then
+        MM.sleep(0.3)
         local detailData = apiPost(
           "/services/api/accountsummary/getRecentTransactionDetail",
           {
@@ -504,7 +503,6 @@ function RefreshAccount(account, since)
         )
 
         if not detailData then
-          -- nil-Antwort = Rate-Limit oder Fehler → weitere Calls abbrechen
           print("Detail-Call fehlgeschlagen (Rate-Limit?), breche ab.")
           detailRateLimited = true
         elseif detailData["data"] then
@@ -513,9 +511,7 @@ function RefreshAccount(account, since)
           if #nameEn > 0 then
             t.name    = nameEn
             t.purpose = t.purpose:gsub(" %(PromptPay[^)]*%)", "")
-            if proxyKey and #proxyKey > 0 then
-              LocalStorage["pc_" .. proxyKey] = tostring(now) .. "|" .. nameEn
-            end
+            LocalStorage[cacheKey] = tostring(now) .. "|" .. nameEn
           end
           detailCount = detailCount + 1
         end
@@ -663,9 +659,8 @@ function fetchTransactionPage(acctNo, acctType, oId, cType, oType,
         --   FTPP = PromptPay direkt (KBank zu KBank über PromptPay)
         --   FTOB = Überweisung andere Bank (mit oder ohne PromptPay-proxyId)
         --   Für alle FTPP/FTOB ohne bekannten Empfänger Detail-Call machen
-        local proxyId   = tx["proxyId"]       or ""
-        local proxyType = tx["proxyTypeCode"] or ""
-        local transType = (tx["transType"]    or ""):upper()
+        local proxyId   = tx["proxyId"]    or ""
+        local transType = (tx["transType"] or ""):upper()
 
         local needsDetail = (transType == "FTPP") or (transType == "FTOB")
 
@@ -678,7 +673,7 @@ function fetchTransactionPage(acctNo, acctType, oId, cType, oType,
             transCode            = tx["transCode"] or "",
             originalSourceId     = tx["originalSourceId"] or "",
             citizenId            = proxyId,
-            toAcctNoMasking      = tx["toAccountNumber"],
+            toAcctNoMasking      = tx["toAccountNumber"] or "",
             debitCreditIndicator = tx["debitCreditIndicator"] or "",
           }
         end
@@ -706,6 +701,8 @@ function parseTx(tx, since)
   local bookingDate = parseDate(dateStr)
   if not bookingDate then return nil end
   if since and bookingDate < since then return nil end
+
+  local valueDate = parseDate(tx["effectiveDate"] or "") or bookingDate
 
   -- Betrag ermitteln
   local deposit   = tonumber(tx["depositAmount"]  or 0) or 0
@@ -756,6 +753,7 @@ function parseTx(tx, since)
 
   return {
     bookingDate   = bookingDate,
+    valueDate     = valueDate,
     purpose       = purpose,
     amount        = amount,
     currency      = "THB",
