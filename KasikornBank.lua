@@ -1,7 +1,8 @@
 -- ============================================================
 -- MoneyMoney Web Banking Extension
 -- Kasikorn Bank (KBank) Thailand – K BIZ Online Banking
--- Version: 3.59
+-- Version: 3.60
+-- 3.60: os.execute("sleep") entfernt (nicht in MoneyMoney-Sandbox verfügbar)
 -- 3.59: POST-Endpoint /authen/login.do → /authen/loginAuthen.do (Bank-Update),
 --       captcha-Feld durch maxTouchPoint ersetzt
 --
@@ -19,7 +20,7 @@
 -- ============================================================
 
 WebBanking {
-  version     = 3.59,
+  version     = 3.60,
   url         = "https://kbiz.kasikornbank.com",
   services    = {"Kasikorn Bank (KBiz)"},
   description = "Kasikorn Bank (KBank) Thailand – K BIZ Online Banking"
@@ -480,10 +481,6 @@ function RefreshAccount(account, since)
         t.name    = cachedName
         t.purpose = t.purpose:gsub(" %(PromptPay[^)]*%)", "")
       elseif not detailRateLimited then
-        -- Kurze Pause zwischen Detail-Calls (Rate-Limit vermeiden)
-        -- os.execute statt MM.sleep (MM.sleep existiert nicht in MoneyMoney API)
-        os.execute("sleep 0.3")
-
         local detailData = apiPost(
           "/services/api/accountsummary/getRecentTransactionDetail",
           {
