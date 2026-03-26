@@ -1,7 +1,9 @@
 -- ============================================================
 -- MoneyMoney Web Banking Extension
 -- Kasikorn Bank (KBank) Thailand – K BIZ Online Banking
--- Version: 3.62
+-- Version: 3.63
+-- 3.63: parseDate parst Uhrzeit aus transDate (YYYY-MM-DD HH:MM:SS),
+--       verhindert fehlerhafte since-Filterung bei gleichtagigen Transaktionen
 -- 3.62: Referer-Header im redirectToIB-Request korrigiert (loginAuthen.do);
 --       MM.sleep(0.3) zwischen Detail-Calls; origRqUid als Cache-Key;
 --       valueDate aus effectiveDate; MM.urlencode UTF-8; Cleanup
@@ -25,7 +27,7 @@
 -- ============================================================
 
 WebBanking {
-  version     = 3.62,
+  version     = 3.63,
   url         = "https://kbiz.kasikornbank.com",
   services    = {"Kasikorn Bank (KBiz)"},
   description = "Kasikorn Bank (KBank) Thailand – K BIZ Online Banking"
@@ -818,12 +820,22 @@ function parseDate(str)
   if not str or #str == 0 then return nil end
   str = tostring(str):match("^%s*(.-)%s*$")
 
-  -- Format: "2026-03-02 08:12:45" oder "2026-03-02T08:12:45"
-  local y, m, d = str:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)")
+  -- Format: "2026-03-02 08:12:45" oder "2026-03-02T08:12:45" (mit optionaler Uhrzeit)
+  local y, m, d, h, mi, s = str:match(
+    "^(%d%d%d%d)%-(%d%d)%-(%d%d)[T ](%d%d):(%d%d):(%d%d)"
+  )
   if y then
     return os.time({
       year=tonumber(y), month=tonumber(m), day=tonumber(d),
-      hour=12, min=0, sec=0
+      hour=tonumber(h), min=tonumber(mi), sec=tonumber(s)
+    })
+  end
+  -- Format: "2026-03-02" (nur Datum, ohne Uhrzeit)
+  local y2, m2, d2 = str:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)$")
+  if y2 then
+    return os.time({
+      year=tonumber(y2), month=tonumber(m2), day=tonumber(d2),
+      hour=0, min=0, sec=0
     })
   end
 
