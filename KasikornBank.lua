@@ -1,7 +1,9 @@
 -- ============================================================
 -- MoneyMoney Web Banking Extension
 -- Kasikorn Bank (KBank) Thailand – K BIZ Online Banking
--- Version: 3.60
+-- Version: 3.61
+-- 3.61: Detail-Call für alle FTOB-Transaktionen (nicht nur PromptPay), um
+--       Empfängernamen bei Payment/Transfer-Umsätzen zu laden
 -- 3.60: os.execute("sleep") entfernt (nicht in MoneyMoney-Sandbox verfügbar)
 -- 3.59: POST-Endpoint /authen/login.do → /authen/loginAuthen.do (Bank-Update),
 --       captcha-Feld durch maxTouchPoint ersetzt
@@ -20,7 +22,7 @@
 -- ============================================================
 
 WebBanking {
-  version     = 3.60,
+  version     = 3.61,
   url         = "https://kbiz.kasikornbank.com",
   services    = {"Kasikorn Bank (KBiz)"},
   description = "Kasikorn Bank (KBank) Thailand – K BIZ Online Banking"
@@ -657,18 +659,17 @@ function fetchTransactionPage(acctNo, acctType, oId, cType, oType,
     for _, tx in ipairs(list) do
       local t = parseTx(tx, since)
       if t then
-        -- PromptPay-Erkennung:
+        -- Detail-Call-Erkennung: Empfängername fehlt + origRqUid vorhanden
         --   FTPP = PromptPay direkt (KBank zu KBank über PromptPay)
-        --   FTOB + proxyId != "" = PromptPay über andere Bank
-        --   Nur wenn kein Empfänger bekannt und origRqUid vorhanden
-        local proxyId  = tx["proxyId"]       or ""
+        --   FTOB = Überweisung andere Bank (mit oder ohne PromptPay-proxyId)
+        --   Für alle FTPP/FTOB ohne bekannten Empfänger Detail-Call machen
+        local proxyId   = tx["proxyId"]       or ""
         local proxyType = tx["proxyTypeCode"] or ""
         local transType = (tx["transType"]    or ""):upper()
 
-        local isPromptPay = (transType == "FTPP") or
-                            (proxyId ~= "" and proxyType ~= "")
+        local needsDetail = (transType == "FTPP") or (transType == "FTOB")
 
-        if not t.name and isPromptPay and (tx["origRqUid"] or "") ~= "" then
+        if not t.name and needsDetail and (tx["origRqUid"] or "") ~= "" then
           t._detail = {
             origRqUid            = tx["origRqUid"],
             acctNo               = acctNo,
