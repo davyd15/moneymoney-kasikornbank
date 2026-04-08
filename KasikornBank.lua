@@ -1,11 +1,15 @@
 -- ============================================================
 -- MoneyMoney Web Banking Extension
 -- Kasikorn Bank (KBank) Thailand – K BIZ Online Banking
--- Version: 3.64
+-- Version: 3.65
 --
--- Login-Flow (6 Schritte, kein 2FA):
+-- Changelog:
+--   3.65: T&C-Seite nach Login automatisch akzeptieren (POST /authen/loginSuccess.do)
+--
+-- Login-Flow (6 Schritte + optionaler T&C-Schritt, kein 2FA):
 --   1. GET  /authen/login.jsp?lang=en         → tokenId aus Hidden-Field
 --   2. POST /authen/loginAuthen.do            → userName, password, tokenId
+--  2b. (optional) T&C-Seite: POST /authen/loginSuccess.do mit cmd=confirmTermCondIB
 --   3. JS-Redirect folgen                     → /authen/ib/redirectToIB.jsp
 --   4. GET  /authen/ib/redirectToIB.jsp       → dataRsso-Token extrahieren
 --   5. GET  /login?dataRsso=...               → Angular-App initialisieren
@@ -19,7 +23,7 @@
 -- ============================================================
 
 WebBanking {
-  version     = 3.64,
+  version     = 3.65,
   url         = "https://kbiz.kasikornbank.com",
   services    = {"Kasikorn Bank (KBiz)"},
   description = "Kasikorn Bank (KBank) Thailand – K BIZ Online Banking"
@@ -120,6 +124,25 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
 
   if not loginContent then
     return "Fehler: Login-Request fehlgeschlagen."
+  end
+
+  -- Schritt 2b: T&C-Seite automatisch akzeptieren (falls Bank diese anzeigt)
+  if loginContent:find("confirmTermCondIB") or loginContent:find("loginSuccess%.do") then
+    print("T&C-Seite erkannt, akzeptiere automatisch ...")
+    loginContent, loginCharset = session.connection:request(
+      "POST",
+      BASE_URL .. "/authen/loginSuccess.do",
+      "cmd=confirmTermCondIB",
+      "application/x-www-form-urlencoded; charset=UTF-8",
+      {
+        ["Accept"]  = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ["Referer"] = BASE_URL .. "/authen/loginAuthen.do",
+        ["Origin"]  = BASE_URL,
+      }
+    )
+    if not loginContent then
+      return "Fehler: T&C-Akzeptanz fehlgeschlagen."
+    end
   end
 
   if not (loginContent:find("event_action.*success") or
