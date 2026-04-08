@@ -12,6 +12,31 @@ A [MoneyMoney](https://moneymoney-app.com) extension for **Kasikorn Bank (KBank)
 - **No 2FA / SMS OTP required** — authenticates directly via RSSO session token
 - Handles the bank's occasional **Terms & Conditions interstitial** automatically
 
+## How It Works
+
+The extension implements MoneyMoney's `WebBanking` Lua API and communicates with the K BIZ portal at `kbiz.kasikornbank.com`.
+
+### Authentication
+
+Login is a 6-step flow with no 2FA:
+
+| Step | Action |
+|------|--------|
+| 1 | `GET /authen/login.jsp` → extract `tokenId` (anti-CSRF token) |
+| 2 | `POST /authen/loginAuthen.do` with credentials + tokenId |
+| 2b | (if shown) T&C interstitial automatically accepted via `POST /authen/loginSuccess.do` |
+| 3–4 | Follow JS redirect → `GET /authen/ib/redirectToIB.jsp` → extract `dataRsso` token |
+| 5 | `GET /login?dataRsso=...` → initialize the Angular app session |
+| 6 | `POST /services/api/authentication/validateSession` → receive `x-session-token` + `ibId`/`ownerId` |
+
+The session token is sent as an `Authorization` header on all subsequent API calls and periodically renewed via `POST /services/api/refreshSession`.
+
+### Data Retrieval
+
+- **Accounts:** `POST /services/api/bankaccountget/getOwnBankAccountFromList`
+- **Transactions:** `POST /services/api/accountsummary/getRecentTransactionList`, paginated by calendar month (up to 180 days)
+- **PromptPay recipient names:** resolved via `POST /services/api/accountsummary/getRecentTransactionDetail` for FTPP/FTOB transactions within the last 30 days, then cached in `LocalStorage` for 90 days to minimize API calls
+
 ## Requirements
 
 - [MoneyMoney](https://moneymoney-app.com) for macOS (any recent version)

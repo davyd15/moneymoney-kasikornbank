@@ -412,7 +412,7 @@ function RefreshAccount(account, since)
   print("Periods: " .. #periods)
 
   for _, period in ipairs(periods) do
-    print("Lade: " .. period.startDate .. " bis " .. period.endDate)
+    print("Loading: " .. period.startDate .. " to " .. period.endDate)
     for _, t in ipairs(fetchTransactionPage(
       num, accType, oId, cType, oType, period.startDate, period.endDate, fromTS
     )) do
