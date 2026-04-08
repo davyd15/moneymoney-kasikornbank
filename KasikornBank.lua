@@ -4,22 +4,22 @@
 -- Version: 3.65
 --
 -- Changelog:
---   3.65: T&C-Seite nach Login automatisch akzeptieren (POST /authen/loginSuccess.do)
+--   3.65: Automatically accept T&C page after login (POST /authen/loginSuccess.do)
 --
--- Login-Flow (6 Schritte + optionaler T&C-Schritt, kein 2FA):
---   1. GET  /authen/login.jsp?lang=en         → tokenId aus Hidden-Field
+-- Login flow (6 steps + optional T&C step, no 2FA):
+--   1. GET  /authen/login.jsp?lang=en         → tokenId from hidden field
 --   2. POST /authen/loginAuthen.do            → userName, password, tokenId
---  2b. (optional) T&C-Seite: POST /authen/loginSuccess.do mit cmd=confirmTermCondIB
---   3. JS-Redirect folgen                     → /authen/ib/redirectToIB.jsp
---   4. GET  /authen/ib/redirectToIB.jsp       → dataRsso-Token extrahieren
---   5. GET  /login?dataRsso=...               → Angular-App initialisieren
+--  2b. (optional) T&C page: POST /authen/loginSuccess.do with cmd=confirmTermCondIB
+--   3. Follow JS redirect                     → /authen/ib/redirectToIB.jsp
+--   4. GET  /authen/ib/redirectToIB.jsp       → extract dataRsso token
+--   5. GET  /login?dataRsso=...               → initialize Angular app
 --   6. POST /services/api/authentication/validateSession → x-session-token + ibId/ownerId
---      POST /services/api/refreshSession      → Token erneuern
+--      POST /services/api/refreshSession      → renew token
 --
--- API-Endpunkte (aus Browser-DevTools):
---   Konten:   POST /services/api/bankaccountget/getOwnBankAccountFromList
---   Umsätze:  POST /services/api/accountsummary/getRecentTransactionList
---             POST /services/api/accountsummary/getRecentTransactionDetail
+-- API endpoints (from browser DevTools):
+--   Accounts:     POST /services/api/bankaccountget/getOwnBankAccountFromList
+--   Transactions: POST /services/api/accountsummary/getRecentTransactionList
+--                 POST /services/api/accountsummary/getRecentTransactionDetail
 -- ============================================================
 
 WebBanking {
@@ -30,23 +30,23 @@ WebBanking {
 }
 
 -- ============================================================
--- Konstanten
+-- Constants
 -- ============================================================
 local BASE_URL             = "https://kbiz.kasikornbank.com"
-local MAX_HISTORY_DAYS     = 180   -- maximaler Abrufzeitraum in Tagen
-local DETAIL_CALL_DAYS     = 30    -- Empfängernamen nur für Umsätze der letzten N Tage
-local DETAIL_CACHE_TTL     = 90    -- Cache-Lebensdauer für Empfängernamen in Tagen
+local MAX_HISTORY_DAYS     = 180   -- max fetch window in days
+local DETAIL_CALL_DAYS     = 30    -- resolve recipient names only for transactions within the last N days
+local DETAIL_CACHE_TTL     = 90    -- cache TTL for recipient names in days
 local SECONDS_PER_DAY      = 86400
-local MAX_PAGES_PER_PERIOD = 20    -- Sicherheits-Limit pro Monat
+local MAX_PAGES_PER_PERIOD = 20    -- safety limit per monthly period
 local ROWS_PER_PAGE        = 100
 
--- Monatsnamen für parseDate
+-- Month name lookup for parseDate
 local MONTH_NAMES = {
   Jan=1, Feb=2, Mar=3, Apr=4, May=5,  Jun=6,
   Jul=7, Aug=8, Sep=9, Oct=10,Nov=11, Dec=12
 }
 
--- proxyTypeCode → lesbares PromptPay-Label für purpose-Feld
+-- proxyTypeCode → human-readable PromptPay label for the purpose field
 local PROXY_TYPE_LABELS = {
   M = "PromptPay Mobile",
   A = "PromptPay Acc",
@@ -56,11 +56,11 @@ local PROXY_TYPE_LABELS = {
 }
 
 -- ============================================================
--- Session-State
+-- Session State
 -- ============================================================
 local session = {
   connection = nil,
-  authToken  = nil,  -- x-session-token (Authorization-Header für alle API-Calls)
+  authToken  = nil,  -- x-session-token (Authorization header for all API calls)
   ibId       = nil,  -- x-ib-id / x-session-ibid
   ownerId    = nil,
   custType   = nil,
@@ -85,11 +85,11 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
   session.connection.useragent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " ..
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-  -- Schritt 1: Login-Seite → tokenId
-  MM.printStatus("Lade Login-Seite ...")
+  -- Step 1: Load login page → tokenId
+  MM.printStatus("Loading login page...")
   local content, charset = session.connection:get(BASE_URL .. "/authen/login.jsp?lang=en")
   if not content or #content == 0 then
-    return "Fehler: Login-Seite nicht erreichbar."
+    return "Login page not reachable."
   end
 
   local tokenId = HTML(content, charset):xpath("//input[@name='tokenId']"):attr("value")
@@ -98,13 +98,13 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
   end
   if not tokenId or #tokenId == 0 then
     tokenId = tostring(math.floor(MM.time() * 1000))
-    print("tokenId Fallback: " .. tokenId)
+    print("tokenId fallback: " .. tokenId)
   else
     print("tokenId: " .. tokenId)
   end
 
-  -- Schritt 2: Login-POST
-  MM.printStatus("Anmelden ...")
+  -- Step 2: Submit login POST
+  MM.printStatus("Signing in...")
   local postBody = "userName="      .. MM.urlencode(username, "UTF-8") ..
                    "&password="     .. MM.urlencode(password, "UTF-8") ..
                    "&tokenId="      .. MM.urlencode(tokenId) ..
@@ -123,12 +123,12 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
   )
 
   if not loginContent then
-    return "Fehler: Login-Request fehlgeschlagen."
+    return "Login request failed."
   end
 
-  -- Schritt 2b: T&C-Seite automatisch akzeptieren (falls Bank diese anzeigt)
+  -- Step 2b: Automatically accept T&C page (if bank presents it)
   if loginContent:find("confirmTermCondIB") or loginContent:find("loginSuccess%.do") then
-    print("T&C-Seite erkannt, akzeptiere automatisch ...")
+    print("T&C page detected, accepting automatically...")
     loginContent, loginCharset = session.connection:request(
       "POST",
       BASE_URL .. "/authen/loginSuccess.do",
@@ -141,7 +141,7 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
       }
     )
     if not loginContent then
-      return "Fehler: T&C-Akzeptanz fehlgeschlagen."
+      return "Failed to accept T&C page."
     end
   end
 
@@ -149,19 +149,19 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
           loginContent:find("redirectToIB") or
           loginContent:find("dataRsso")) then
     local errMsg = HTML(loginContent, loginCharset):xpath("//*[@id='errorText']"):text()
-    print("Login fehlgeschlagen: " .. (errMsg or "unbekannt"))
+    print("Login failed: " .. (errMsg or "unknown"))
     return LoginFailed
   end
 
-  print("Login erfolgreich!")
+  print("Login successful!")
 
-  -- Schritt 3: JS-Redirect zu redirectToIB.jsp manuell folgen
+  -- Step 3: Follow JS redirect to redirectToIB.jsp manually
   local redirectURL = loginContent:match("window%.location%s*=%s*['\"]([^'\"]+)['\"]")
                    or "/authen/ib/redirectToIB.jsp"
   if redirectURL:sub(1, 1) == "/" then
     redirectURL = BASE_URL .. redirectURL
   end
-  print("Folge Redirect: " .. redirectURL)
+  print("Following redirect: " .. redirectURL)
 
   local redirectContent = session.connection:request(
     "GET", redirectURL, nil, nil,
@@ -172,10 +172,10 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
   )
 
   if not redirectContent then
-    return "Fehler: redirectToIB.jsp nicht erreichbar."
+    return "redirectToIB.jsp not reachable."
   end
 
-  -- Schritt 4: dataRsso-Token extrahieren
+  -- Step 4: Extract dataRsso token
   local dataRssoURL = redirectContent:match(
     'window%.top%.location%.href%s*=%s*"(https://kbiz%.kasikornbank%.com/login%?dataRsso=[^"]+)"'
   ) or redirectContent:match(
@@ -183,23 +183,23 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
   )
 
   if not dataRssoURL then
-    return "Fehler: dataRsso URL nicht gefunden in redirectToIB-Antwort."
+    return "dataRsso URL not found in redirectToIB response."
   end
 
   local dataRsso = dataRssoURL:match("dataRsso=(.+)$")
   if not dataRsso then
-    return "Fehler: dataRsso Token nicht extrahierbar."
+    return "Failed to extract dataRsso token."
   end
-  print("dataRsso Token extrahiert, Laenge: " .. #dataRsso)
+  print("dataRsso token extracted, length: " .. #dataRsso)
 
-  -- Schritt 5: Angular-App initialisieren
-  print("Lade Angular-App ...")
+  -- Step 5: Initialize Angular app
+  print("Loading Angular app...")
   session.connection:request("GET", dataRssoURL, nil, nil,
     { ["Referer"] = redirectURL, ["Accept"] = "text/html,application/xhtml+xml,*/*" }
   )
 
-  -- Schritt 6a: validateSession → x-session-token + ibId/ownerId
-  print("Rufe validateSession auf ...")
+  -- Step 6a: validateSession → x-session-token + ibId/ownerId
+  print("Calling validateSession...")
   local vsContent, _, _, _, vsHeaders = session.connection:request(
     "POST",
     BASE_URL .. "/services/api/authentication/validateSession",
@@ -218,15 +218,15 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
     local tok = vsHeaders["x-session-token"]
     if tok and #tok > 0 then
       session.authToken = tok
-      print("x-session-token erhalten, Laenge: " .. #tok)
+      print("x-session-token received, length: " .. #tok)
     else
-      print("WARNUNG: Kein x-session-token in validateSession Response Headers")
+      print("WARNING: No x-session-token in validateSession response headers")
       for k, v in pairs(vsHeaders) do
         print("  Header: " .. k .. " = " .. tostring(v):sub(1, 80))
       end
     end
   else
-    print("WARNUNG: Keine Response Headers von validateSession")
+    print("WARNING: No response headers from validateSession")
   end
 
   if vsContent and #vsContent > 0 then
@@ -242,15 +242,15 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
 
       print("validateSession OK: ibId=" .. session.ibId .. " ownerId=" .. session.ownerId)
     else
-      print("validateSession: JSON-Parse Fehler")
+      print("validateSession: JSON parse error")
       if vsContent then print("Response: " .. vsContent:sub(1, 200)) end
     end
   end
 
-  -- Schritt 6b: refreshSession → Token erneuern
+  -- Step 6b: refreshSession → renew token
   if session.authToken and #session.authToken > 0 and
      session.ibId      and #session.ibId      > 0 then
-    print("Rufe refreshSession auf ...")
+    print("Calling refreshSession...")
     local _, _, _, _, rsHeaders = session.connection:request(
       "POST",
       BASE_URL .. "/services/api/refreshSession",
@@ -274,12 +274,12 @@ function InitializeSession(protocol, bankCode, username, reserved, password)
       local newToken = rsHeaders["x-session-token"]
       if newToken and #newToken > 0 then
         session.authToken = newToken
-        print("refreshSession: neuer x-session-token erhalten")
+        print("refreshSession: new x-session-token received")
       end
     end
   end
 
-  MM.printStatus("Erfolgreich angemeldet.")
+  MM.printStatus("Successfully signed in.")
   return nil
 end
 
@@ -287,10 +287,10 @@ end
 -- ListAccounts
 -- ============================================================
 function ListAccounts(knownAccounts)
-  MM.printStatus("Lade Konten ...")
+  MM.printStatus("Loading accounts...")
 
   if not session.ownerId or #session.ownerId == 0 then
-    print("Warnung: ownerId nicht gesetzt, versuche ohne...")
+    print("Warning: ownerId not set, proceeding without...")
     session.ownerId   = ""
     session.ibId      = session.ibId      or ""
     session.custType  = session.custType  or "IX"
@@ -311,13 +311,13 @@ function ListAccounts(knownAccounts)
   })
 
   if not data or not data["data"] or not data["data"]["ownAccountList"] then
-    return "Fehler: Kontoliste konnte nicht geladen werden."
+    return "Failed to load account list."
   end
 
   local accounts = {}
   for _, acc in ipairs(data["data"]["ownAccountList"]) do
     local number  = tostring(acc["accountNo"] or "")
-    local name    = acc["accountNoNickNameEN"] or acc["accountName"] or "KBank Konto"
+    local name    = acc["accountNoNickNameEN"] or acc["accountName"] or "KBank Account"
     local accType = acc["accountType"] or "SA"
 
     local mmType = AccountTypeGiro
@@ -327,8 +327,8 @@ function ListAccounts(knownAccounts)
     end
 
     if #number > 0 then
-      -- Session-Kontext pro Konto im LocalStorage sichern, damit RefreshAccount
-      -- ohne erneuten Login auskommt (wird bei jedem ListAccounts aktualisiert)
+      -- Persist session context per account in LocalStorage so RefreshAccount
+      -- can work without re-authenticating (updated on every ListAccounts call)
       LocalStorage[number .. "_accType"]   = accType
       LocalStorage[number .. "_ownerId"]   = session.ownerId   or ""
       LocalStorage[number .. "_ibId"]      = session.ibId      or ""
@@ -344,13 +344,13 @@ function ListAccounts(knownAccounts)
         bic           = "KASITHBK",
         type          = mmType,
       })
-      print("Konto: " .. number .. " (" .. name .. ", " .. accType .. ")")
-      print("  Saldo: " .. tostring(acc["availableBalance"] or "?") .. " THB")
+      print("Account: " .. number .. " (" .. name .. ", " .. accType .. ")")
+      print("  Balance: " .. tostring(acc["availableBalance"] or "?") .. " THB")
     end
   end
 
   if #accounts == 0 then
-    return "Fehler: Keine Konten gefunden."
+    return "No accounts found."
   end
 
   return accounts
@@ -360,9 +360,9 @@ end
 -- RefreshAccount
 -- ============================================================
 function RefreshAccount(account, since)
-  MM.printStatus("Lade Umsaetze fuer " .. account.accountNumber .. " ...")
+  MM.printStatus("Fetching transactions for " .. account.accountNumber .. "...")
 
-  -- Session-Kontext aus LocalStorage wiederherstellen
+  -- Restore session context from LocalStorage
   local num     = account.accountNumber
   local accType = LocalStorage[num .. "_accType"]   or "SA"
   local oId     = LocalStorage[num .. "_ownerId"]   or session.ownerId or ""
@@ -373,7 +373,7 @@ function RefreshAccount(account, since)
   if oIbId and #oIbId > 0 then session.ibId    = oIbId end
   if oId   and #oId   > 0 then session.ownerId = oId   end
 
-  -- Saldo abrufen
+  -- Fetch current balance
   local balData = apiPost("/services/api/bankaccountget/getOwnBankAccountFromList", {
     language              = "en",
     custType              = cType,
@@ -394,22 +394,22 @@ function RefreshAccount(account, since)
       end
     end
   end
-  print("Saldo: " .. balance .. " THB")
+  print("Balance: " .. balance .. " THB")
 
-  -- Zeitraum bestimmen (max. 180 Tage)
+  -- Determine date range (max 180 days)
   local now          = os.time()
   local maxHistoryTS = now - MAX_HISTORY_DAYS * SECONDS_PER_DAY
   local fromTS       = since or maxHistoryTS
 
   if fromTS < maxHistoryTS then
-    print("since zu alt, begrenze auf " .. MAX_HISTORY_DAYS .. " Tage")
+    print("since too old, capping at " .. MAX_HISTORY_DAYS .. " days")
     fromTS = maxHistoryTS
   end
 
-  -- Umsätze monatsweise laden
+  -- Fetch transactions month by month
   local transactions = {}
   local periods      = buildMonthPeriods(fromTS, now)
-  print("Zeitraeume: " .. #periods)
+  print("Periods: " .. #periods)
 
   for _, period in ipairs(periods) do
     print("Lade: " .. period.startDate .. " bis " .. period.endDate)
@@ -420,9 +420,9 @@ function RefreshAccount(account, since)
     end
   end
 
-  -- Detail-Calls für FTPP/FTOB-Transaktionen ohne Empfängernamen
-  -- Nur für Umsätze der letzten DETAIL_CALL_DAYS Tage; Ergebnisse werden
-  -- DETAIL_CACHE_TTL Tage im LocalStorage gecacht (Key: origRqUid).
+  -- Detail calls for FTPP/FTOB transactions without a known recipient name.
+  -- Only for transactions within the last DETAIL_CALL_DAYS days; results are
+  -- cached in LocalStorage for DETAIL_CACHE_TTL days (key: origRqUid).
   local detailCutoff      = now - DETAIL_CALL_DAYS * SECONDS_PER_DAY
   local cacheTtl          = DETAIL_CACHE_TTL * SECONDS_PER_DAY
   local detailCount       = 0
@@ -471,7 +471,7 @@ function RefreshAccount(account, since)
         )
 
         if not detailData then
-          print("Detail-Call fehlgeschlagen (Rate-Limit?), breche ab.")
+          print("Detail call failed (rate limit?), aborting.")
           detailRateLimited = true
         elseif detailData["data"] then
           local nameEn = detailData["data"]["toAccountNameEn"] or ""
@@ -489,11 +489,11 @@ function RefreshAccount(account, since)
   end
 
   if detailCount > 0 or cacheHits > 0 then
-    print("Detail-Calls: " .. detailCount .. ", Cache-Treffer: " .. cacheHits)
+    print("Detail calls: " .. detailCount .. ", cache hits: " .. cacheHits)
   end
 
   table.sort(transactions, function(a, b) return a.bookingDate > b.bookingDate end)
-  print("Umsaetze gesamt: " .. #transactions)
+  print("Transactions total: " .. #transactions)
 
   return { balance = balance, transactions = transactions }
 end
@@ -502,20 +502,20 @@ end
 -- EndSession
 -- ============================================================
 function EndSession()
-  MM.printStatus("Melde ab ...")
+  MM.printStatus("Signing out...")
   if session.connection then
     local ok, err = pcall(function()
       session.connection:get(BASE_URL .. "/authen/logout.do")
     end)
     if not ok then
-      print("Logout-Fehler (ignoriert): " .. tostring(err))
+      print("Logout error (ignored): " .. tostring(err))
     end
   end
   return nil
 end
 
 -- ============================================================
--- Hilfsfunktion: JSON-POST mit Standard-Auth-Headers
+-- Helper: JSON POST with standard auth headers
 -- ============================================================
 function apiPost(path, payload, referer)
   local ref  = referer or (BASE_URL .. "/menu/account/account/recent-transaction")
@@ -546,19 +546,19 @@ function apiPost(path, payload, referer)
   )
 
   if not content or #content == 0 then
-    print("Leere Antwort von: " .. path)
+    print("Empty response from: " .. path)
     return nil
   end
 
   local ok, data = pcall(function() return JSON(content):dictionary() end)
   if not ok or not data then
-    print("JSON-Fehler von: " .. path)
-    print("Antwort: " .. content:sub(1, 300))
+    print("JSON error from: " .. path)
+    print("Response: " .. content:sub(1, 300))
     return nil
   end
 
   if data["status"] ~= "S" then
-    print("API-Fehler von " .. path .. ": status=" .. tostring(data["status"] or "?") ..
+    print("API error from " .. path .. ": status=" .. tostring(data["status"] or "?") ..
           (data["errorMessage"] and " msg=" .. data["errorMessage"] or ""))
   end
 
@@ -566,7 +566,7 @@ function apiPost(path, payload, referer)
 end
 
 -- ============================================================
--- Umsätze eines Zeitraums paginiert laden
+-- Fetch transactions for a date range with pagination
 -- ============================================================
 function fetchTransactionPage(acctNo, acctType, oId, cType, oType,
                                startDate, endDate, since)
@@ -588,7 +588,7 @@ function fetchTransactionPage(acctNo, acctType, oId, cType, oType,
     })
 
     if not data or not data["data"] then
-      print("Keine Daten fuer Seite " .. pageNo)
+      print("No data for page " .. pageNo)
       break
     end
 
@@ -596,7 +596,7 @@ function fetchTransactionPage(acctNo, acctType, oId, cType, oType,
     local list  = d["recentTransactionList"] or {}
     local total = tonumber(d["totalList"] or 0) or 0
 
-    print("Seite " .. pageNo .. ": " .. #list .. " von " .. total .. " Umsaetzen")
+    print("Page " .. pageNo .. ": " .. #list .. " of " .. total .. " transactions")
 
     for _, tx in ipairs(list) do
       local t = parseTx(tx, since)
@@ -604,7 +604,7 @@ function fetchTransactionPage(acctNo, acctType, oId, cType, oType,
         local proxyId   = tx["proxyId"]    or ""
         local transType = (tx["transType"] or ""):upper()
 
-        -- Detail-Call vormerken für FTPP/FTOB ohne bekannten Empfänger
+        -- Schedule detail call for FTPP/FTOB without a known recipient
         if not t.name and (transType == "FTPP" or transType == "FTOB")
            and (tx["origRqUid"] or "") ~= "" then
           t._detail = {
@@ -633,7 +633,7 @@ function fetchTransactionPage(acctNo, acctType, oId, cType, oType,
 end
 
 -- ============================================================
--- Einzelnen API-Umsatz in MoneyMoney-Transaktion umwandeln
+-- Convert a single API transaction entry to a MoneyMoney transaction
 -- ============================================================
 function parseTx(tx, since)
   local bookingDate = parseDate(tx["transDate"] or tx["effectiveDate"] or "")
@@ -642,8 +642,8 @@ function parseTx(tx, since)
 
   local valueDate = parseDate(tx["effectiveDate"] or "") or bookingDate
 
-  -- Betrag: depositAmount positiv, withdrawAmount negativ;
-  -- debitCreditIndicator ("DR"/"CR") korrigiert bei Mehrdeutigkeit
+  -- Amount: depositAmount is positive, withdrawAmount is negative;
+  -- debitCreditIndicator ("DR"/"CR") corrects ambiguous cases
   local deposit   = tonumber(tx["depositAmount"]  or 0) or 0
   local withdraw  = tonumber(tx["withdrawAmount"] or 0) or 0
   local indicator = tx["debitCreditIndicator"] or ""
@@ -652,7 +652,7 @@ function parseTx(tx, since)
   if indicator == "DR" and amount > 0 then amount = -amount end
   if indicator == "CR" and amount < 0 then amount = -amount end
 
-  -- purpose aufbauen: Transaktionsname + Zielkonto/PromptPay-ID + Beschreibung + Kanal
+  -- Build purpose: transaction name + target account/PromptPay ID + description + channel
   local purpose   = tx["transNameEn"]  or tx["transNameTh"]  or ""
   local toAcc     = tx["toAccountNumber"] or tx["benefitAccountNo"] or ""
   local proxyId   = tx["proxyId"]         or ""
@@ -668,8 +668,8 @@ function parseTx(tx, since)
   if #desc    > 0 then purpose = purpose .. " " .. desc    end
   if #channel > 0 then purpose = purpose .. " [" .. channel .. "]" end
 
-  -- name: bevorzugt englischer Empfängername aus der Transaktionsliste;
-  -- für FTPP/FTOB wird er ggf. via Detail-Call nachgeladen (t._detail)
+  -- name: prefer English recipient name from the transaction list;
+  -- for FTPP/FTOB it may be loaded later via a detail call (t._detail)
   local beneficiary = tx["benefitAccountNameEn"] or tx["benefitAccountNameTh"]
                    or tx["toAccountNameEn"]       or tx["toAccountNameTh"] or ""
 
@@ -686,7 +686,7 @@ function parseTx(tx, since)
 end
 
 -- ============================================================
--- Monatliche Zeiträume zwischen fromTS und toTS generieren
+-- Generate monthly date ranges between fromTS and toTS
 -- ============================================================
 function buildMonthPeriods(fromTS, toTS)
   local periods = {}
@@ -698,7 +698,7 @@ function buildMonthPeriods(fromTS, toTS)
     local nextYear  = d.month == 12 and d.year + 1 or d.year
     local nextMonth = d.month == 12 and 1 or d.month + 1
 
-    -- Monatsende: Tag=0 des Folgemonats (korrekt bei Sommerzeit-Übergängen)
+    -- Month end: day=0 of the following month (handles DST transitions correctly)
     local monthEnd = os.time({ year=nextYear, month=nextMonth, day=0,
                                 hour=23, min=59, sec=59 })
 
@@ -723,11 +723,11 @@ function makeRequestId()
 end
 
 -- ============================================================
--- Datum parsen — unterstützte Formate:
---   "2026-03-02 08:12:45"  oder  "2026-03-02T08:12:45"  (transDate)
---   "2026-03-02"                                          (Datumsfeld ohne Zeit)
---   "DD/MM/YYYY"                                          (API-Request-Format)
---   "Mon Mar 02 07:00:00 ICT 2026"                        (effectiveDate)
+-- Parse date — supported formats:
+--   "2026-03-02 08:12:45"  or  "2026-03-02T08:12:45"  (transDate)
+--   "2026-03-02"                                        (date-only field)
+--   "DD/MM/YYYY"                                        (API request format)
+--   "Mon Mar 02 07:00:00 ICT 2026"                      (effectiveDate)
 -- ============================================================
 function parseDate(str)
   if not str or #str == 0 then return nil end
@@ -757,6 +757,6 @@ function parseDate(str)
                      hour=12, min=0, sec=0 })
   end
 
-  print("Datum nicht parsebar: " .. str)
+  print("Date not parseable: " .. str)
   return nil
 end
