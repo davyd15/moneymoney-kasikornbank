@@ -1,9 +1,18 @@
 -- ============================================================
 -- MoneyMoney Web Banking Extension
 -- Kasikorn Bank (KBank) Thailand – K BIZ Online Banking
--- Version: 3.65
+-- Version: 3.67
 --
 -- Changelog:
+--   3.67: Drop transactions the bank delivers more than once. Paging stops on the
+--         first short page instead of trusting totalList, which the bank sometimes
+--         reports too high, causing the next page to repeat rows already seen.
+--   3.66: Fix duplicate transactions. Booking dates are now anchored to 12:00 UTC
+--         of the calendar day instead of the local wall-clock time of the transaction,
+--         so the timestamp no longer shifts when the Mac's time zone or DST changes.
+--         The since filter compares calendar days instead of timestamps, and cached
+--         recipient names are applied to transactions of any age, so name/purpose
+--         stay identical across refreshes.
 --   3.65: Automatically accept T&C page after login (POST /authen/loginSuccess.do)
 --
 -- Login flow (6 steps + optional T&C step, no 2FA):
@@ -23,7 +32,7 @@
 -- ============================================================
 
 WebBanking {
-  version     = 3.65,
+  version     = 3.67,
   url         = "https://kbiz.kasikornbank.com",
   services    = {"Kasikorn Bank (KBiz)"},
   description = "Kasikorn Bank (KBank) Thailand – K BIZ Online Banking"
@@ -35,7 +44,10 @@ WebBanking {
 local BASE_URL             = "https://kbiz.kasikornbank.com"
 local MAX_HISTORY_DAYS     = 180   -- max fetch window in days
 local DETAIL_CALL_DAYS     = 30    -- resolve recipient names only for transactions within the last N days
-local DETAIL_CACHE_TTL     = 90    -- cache TTL for recipient names in days
+local DETAIL_CACHE_TTL     = 400   -- cache TTL for recipient names in days; must stay
+                                   -- well above MAX_HISTORY_DAYS, otherwise a name would
+                                   -- expire while MoneyMoney can still re-request the
+                                   -- transaction, changing its name and creating a duplicate
 local SECONDS_PER_DAY      = 86400
 local MAX_PAGES_PER_PERIOD = 20    -- safety limit per monthly period
 local ROWS_PER_PAGE        = 100
@@ -406,23 +418,47 @@ function RefreshAccount(account, since)
     fromTS = maxHistoryTS
   end
 
+  -- Round down to the start of that calendar day, in the same 12:00 UTC space
+  -- parseDate produces. Comparing raw timestamps would drop transactions booked
+  -- earlier on the since day, which is exactly what MoneyMoney asks us to return.
+  local fromDay = os.date("*t", fromTS)
+  fromTS = dayTimestamp(fromDay.year, fromDay.month, fromDay.day)
+
   -- Fetch transactions month by month
   local transactions = {}
   local periods      = buildMonthPeriods(fromTS, now)
   print("Periods: " .. #periods)
+
+  -- Collect the periods, dropping any transaction the bank hands us more than
+  -- once. The paging API repeats rows when totalList exceeds what a period
+  -- actually contains, and MoneyMoney imports every repeat as a separate entry.
+  local seenUids   = {}
+  local duplicates = 0
 
   for _, period in ipairs(periods) do
     print("Loading: " .. period.startDate .. " to " .. period.endDate)
     for _, t in ipairs(fetchTransactionPage(
       num, accType, oId, cType, oType, period.startDate, period.endDate, fromTS
     )) do
-      table.insert(transactions, t)
+      if seenUids[t._uid] then
+        duplicates = duplicates + 1
+      else
+        seenUids[t._uid] = true
+        t._uid = nil
+        table.insert(transactions, t)
+      end
     end
   end
 
+  if duplicates > 0 then
+    print("Dropped " .. duplicates .. " transactions the bank delivered twice")
+  end
+
   -- Detail calls for FTPP/FTOB transactions without a known recipient name.
-  -- Only for transactions within the last DETAIL_CALL_DAYS days; results are
-  -- cached in LocalStorage for DETAIL_CACHE_TTL days (key: origRqUid).
+  -- A cached name is applied to a transaction of any age, so name and purpose stay
+  -- identical on every refresh; only the network lookup is limited to the last
+  -- DETAIL_CALL_DAYS days. Cache lives in LocalStorage for DETAIL_CACHE_TTL days
+  -- (key: origRqUid).
   local detailCutoff      = now - DETAIL_CALL_DAYS * SECONDS_PER_DAY
   local cacheTtl          = DETAIL_CACHE_TTL * SECONDS_PER_DAY
   local detailCount       = 0
@@ -430,7 +466,7 @@ function RefreshAccount(account, since)
   local detailRateLimited = false
 
   for _, t in ipairs(transactions) do
-    if t._detail and t.bookingDate >= detailCutoff then
+    if t._detail then
       local cacheKey   = "pc_" .. t._detail.origRqUid
       local cachedName = nil
 
@@ -448,7 +484,7 @@ function RefreshAccount(account, since)
       if cachedName and #cachedName > 0 then
         t.name    = cachedName
         t.purpose = t.purpose:gsub(" %(PromptPay[^)]*%)", "")
-      elseif not detailRateLimited then
+      elseif not detailRateLimited and t.bookingDate >= detailCutoff then
         MM.sleep(0.3)
         local detailData = apiPost(
           "/services/api/accountsummary/getRecentTransactionDetail",
@@ -604,6 +640,15 @@ function fetchTransactionPage(acctNo, acctType, oId, cType, oType,
         local proxyId   = tx["proxyId"]    or ""
         local transType = (tx["transType"] or ""):upper()
 
+        -- Identity of this transaction at the bank. origRqUid is unique per
+        -- transaction; the fallback covers the rare entry that has none.
+        t._uid = (tx["origRqUid"] or "") ~= "" and tx["origRqUid"]
+                 or table.concat({ tostring(tx["transDate"] or ""),
+                                   tostring(tx["withdrawAmount"] or ""),
+                                   tostring(tx["depositAmount"]  or ""),
+                                   tostring(tx["transCode"]      or ""),
+                                   t.purpose }, "|")
+
         -- Schedule detail call for FTPP/FTOB without a known recipient
         if not t.name and (transType == "FTPP" or transType == "FTOB")
            and (tx["origRqUid"] or "") ~= "" then
@@ -624,7 +669,11 @@ function fetchTransactionPage(acctNo, acctType, oId, cType, oType,
       end
     end
 
-    if (pageNo - 1) * ROWS_PER_PAGE + #list >= total or #list == 0 then break end
+    -- A short page is always the last one. Relying on totalList alone is not
+    -- safe: the bank sometimes reports a count larger than the period holds,
+    -- and asking for the next page then returns the same rows again.
+    if #list < ROWS_PER_PAGE then break end
+    if (pageNo - 1) * ROWS_PER_PAGE + #list >= total then break end
     pageNo = pageNo + 1
 
   until pageNo > MAX_PAGES_PER_PERIOD
@@ -733,30 +782,56 @@ function parseDate(str)
   if not str or #str == 0 then return nil end
   str = tostring(str):match("^%s*(.-)%s*$")
 
-  local y, m, d, h, mi, s = str:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)[T ](%d%d):(%d%d):(%d%d)")
+  -- The time component of transDate is deliberately discarded: the bank reports
+  -- Bangkok wall-clock time, but a booking is a calendar day, not a point in time.
+  local y, m, d = str:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)")
   if y then
-    return os.time({ year=tonumber(y), month=tonumber(m), day=tonumber(d),
-                     hour=tonumber(h), min=tonumber(mi), sec=tonumber(s) })
-  end
-
-  local y2, m2, d2 = str:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)$")
-  if y2 then
-    return os.time({ year=tonumber(y2), month=tonumber(m2), day=tonumber(d2),
-                     hour=0, min=0, sec=0 })
+    return dayTimestamp(tonumber(y), tonumber(m), tonumber(d))
   end
 
   local dd, mm, yy = str:match("^(%d%d?)/(%d%d?)/(%d%d%d%d)")
   if dd then
-    return os.time({ year=tonumber(yy), month=tonumber(mm), day=tonumber(dd),
-                     hour=12, min=0, sec=0 })
+    return dayTimestamp(tonumber(yy), tonumber(mm), tonumber(dd))
   end
 
   local mon, day, year = str:match("%a+%s+(%a+)%s+(%d+)%s+%d+:%d+:%d+%s+%a+%s+(%d%d%d%d)")
   if mon and MONTH_NAMES[mon] then
-    return os.time({ year=tonumber(year), month=MONTH_NAMES[mon], day=tonumber(day),
-                     hour=12, min=0, sec=0 })
+    return dayTimestamp(tonumber(year), MONTH_NAMES[mon], tonumber(day))
   end
 
   print("Date not parseable: " .. str)
   return nil
+end
+
+-- ============================================================
+-- POSIX timestamp for 12:00 UTC on a calendar day.
+--
+-- Booking dates must never depend on the Mac's time zone: os.time() interprets
+-- its fields locally, so the same booking day would yield a different timestamp
+-- after a time zone change or a DST switch. MoneyMoney would then no longer
+-- recognise already imported transactions and would import them a second time.
+-- Anchoring at 12:00 UTC keeps the timestamp constant and still resolves to the
+-- correct calendar day in every time zone from UTC-11 to UTC+11, which covers both
+-- Germany and Thailand. Verified against Berlin, Bangkok, Los Angeles and Honolulu.
+-- ============================================================
+function dayTimestamp(y, m, d)
+  local noonLocal = os.time({ year=y, month=m, day=d, hour=12, min=0, sec=0 })
+  return noonLocal + utcOffsetAt(noonLocal)
+end
+
+-- Seconds the local time zone is ahead of UTC at the given timestamp,
+-- derived by comparing the local and UTC calendar fields (DST aware).
+function utcOffsetAt(ts)
+  local l = os.date("*t",  ts)
+  local u = os.date("!*t", ts)
+
+  local dayDiff = l.day - u.day
+  if     dayDiff >  1 then dayDiff = -1   -- local is in the previous month
+  elseif dayDiff < -1 then dayDiff =  1   -- UTC is in the previous month
+  end
+
+  return dayDiff * SECONDS_PER_DAY
+       + (l.hour - u.hour) * 3600
+       + (l.min  - u.min)  * 60
+       + (l.sec  - u.sec)
 end
